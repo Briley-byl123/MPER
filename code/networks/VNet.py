@@ -1,7 +1,11 @@
 import torch
 from torch import nn
 import pdb
-
+import torch.nn.functional as F
+import numpy as np
+import random
+import h5py
+import pickle
 
 class ConvBlock(nn.Module):
     def __init__(self, n_stages, n_filters_in, n_filters_out, kernel_size=3, padding=1, normalization='none'):
@@ -232,17 +236,19 @@ class Decoder(nn.Module):
         x8_up = self.block_eight_up(x8)
         x8_up = x8_up + x1
         x9 = self.block_nine(x8_up)
-
+        # x9 = F.dropout3d(x9, p=0.5, training=True)
         if self.has_dropout:
             x9 = self.dropout(x9)
         out_seg = self.out_conv(x9)
         return out_seg, x8_up, x9
  
 class VNet(nn.Module):
-    def __init__(self, n_channels=3, n_classes=2, n_filters=16, normalization='none', has_dropout=False, has_residual=False,rep_clf = False,rep_head = False):
+    def __init__(self, n_channels=3, n_classes=2, n_filters=16, normalization='none', has_dropout=False, has_residual=False,rep_clf = True,rep_head = True):
         super(VNet, self).__init__()
 
         self.encoder = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
+        self.rep_clf = rep_clf
+        self.rep_head = rep_head
         self.decoder = Decoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
         dim_in = 16
         feat_dim = 32
@@ -297,7 +303,65 @@ class VNet(nn.Module):
 
         if self.rep_clf:
             res["rep_clf"] = x9
-        return res # 4, 16, 112, 112, 80
+        return res#
+
+
+class CosProto_Module_3D(nn.Module):
+    def __init__(self,args, in_planes, num_classes, num_micro_proto, proto_update_momentum=0.99,init_proto=False):
+        super(CosProto_Module_3D, self).__init__()
+        self.in_planes = in_planes
+        self.num_classes = num_classes
+        self.num_micro_proto = num_micro_proto
+        self.init_proto_path ='../model/model_LA_PPC_{}/LA_{}_{}_labeled/pre_train/{}_init_prototype.pkl'.format(args.loss_ppc_weight,args.exp, args.labelnum, args.model)
+        self.temp = 0.1
+                # 设置随机种子
+        torch.manual_seed(args.seed)
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+
+        if init_proto:
+            self.init_proto()
+        else:   
+            init_proto = torch.from_numpy(np.random.randn(num_micro_proto * num_classes, in_planes).astype('f'))
+            self.proto_list = nn.Parameter(init_proto, requires_grad=False)
+        self.momentum = proto_update_momentum
+    
+    @staticmethod
+    def l2_normalize(x):
+        return nn.functional.normalize(x, dim=-1)
+    def forward(self, x):
+        bs, c, h, w, d = x.size()
+        x_p2s = x.permute(0, 2, 3, 4, 1).contiguous().view(-1, self.in_planes)
+        x_p2s = self.l2_normalize(x_p2s)
+
+        cur_proto = self.proto_list.clone().detach()
+        with torch.no_grad():
+            cur_proto = self.l2_normalize(cur_proto)
+        
+        masks=torch.einsum('ij,kj->ik', [x_p2s, cur_proto])
+        fuse_res = masks.view(-1, self.num_classes, self.num_micro_proto)
+
+        res, res_idx = torch.max(fuse_res, dim=2) 
+        res =res.view(bs, h, w, d, self.num_classes).permute(0, 4, 1, 2, 3).contiguous()/self.temp
+
+        return res,res_idx,masks
+    
+    def init_proto(self):
+        print(f"Load proto from: '{self.init_proto_path}'")
+        with open(self.init_proto_path, 'rb') as handle:
+            init_protos = pickle.load(handle)
+        num_class = len(init_protos)
+        all_protos = []
+        for cls_id in range(num_class):
+            all_protos.append(torch.Tensor(np.stack(init_protos[cls_id], 0)))
+        proto_tensor = torch.stack(all_protos, 0)
+        self.proto_list = proto_tensor.view(-1, self.in_planes).cuda()
+    def update_proto(self, rep, cls_id, proto_id):
+        self.proto_list[(cls_id*self.num_micro_proto+proto_id).long(), :] = self.proto_list[(cls_id*self.num_micro_proto+proto_id).long(), :] * self.momentum + (1 - self.momentum) * rep
+
+
+
+
 
 
 if __name__ == '__main__':
@@ -309,3 +373,4 @@ if __name__ == '__main__':
     flops, params = profile(model, inputs=(input,))
     macs, params = clever_format([flops, params], "%.3f")
     print(macs, params)
+
