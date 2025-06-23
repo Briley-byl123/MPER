@@ -20,10 +20,7 @@
 
 
 <p align="center">
-  <a href='https://arxiv.org/abs/2503.14343'>
-    <img src='https://img.shields.io/badge/arXiv-PDF-green?style=flat&logo=arXiv&logoColor=green' alt='arXiv PDF'>
-  </a>
-  &nbsp;
+
   <a href='https://ieeexplore.ieee.org/abstract/document/10889249'>
     <img src='https://img.shields.io/badge/ICASSP-Paper-blue?style=flat&logo=ieee&logoColor=white' alt='ICASSP Paper'>
   </a>
